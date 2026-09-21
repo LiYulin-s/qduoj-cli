@@ -8,15 +8,24 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import typer
+from rich.prompt import Prompt
+from rich.text import Text
 
 from .api import OJAPIError, OJClient
 from .config import clear_session, get_base_url, save_base_url
 from .models import Contest, Problem, SubmissionListItem, is_final
 from .render import (
-    html_to_text,
+    console,
     new_testcases,
+    print_contest,
+    print_contests,
+    print_error,
+    print_ok,
     print_problem,
-    print_submission,
+    print_problems,
+    print_submissions,
+    print_user,
+    print_warning,
     testcase_text,
     verdict_text,
 )
@@ -30,7 +39,6 @@ app = typer.Typer(
 _state = SimpleNamespace(base_url=None)
 
 CONTEST_PWD_ERROR = "Wrong password or password expired"
-CONTEST_STATUS = {"1": "Not started", "0": "Running", "-1": "Ended"}
 LANG_BY_EXT = {
     ".c": "C",
     ".cpp": "C++",
@@ -80,7 +88,7 @@ def run(make_coro) -> None:
     try:
         asyncio.run(_inner())
     except OJAPIError as e:
-        typer.secho(f"Error: {e.message}", fg=typer.colors.RED, err=True)
+        print_error(e.message)
         raise typer.Exit(1) from None
 
 
@@ -91,20 +99,27 @@ async def require_login(client: OJClient):
     return profile
 
 
+async def with_contest_password(coro_factory, client: OJClient, contest_id: int):
+    """Run coro_factory(); on a contest-password error, prompt, verify, retry once."""
+    try:
+        return await coro_factory()
+    except OJAPIError as e:
+        if CONTEST_PWD_ERROR not in e.message:
+            raise
+        password = Prompt.ask("Contest password", password=True)
+        await client.verify_contest_password(contest_id, password)
+        return await coro_factory()
+
+
 async def get_problem_with_password(
     client: OJClient, display_id: str, contest_id: int | None
 ) -> Problem:
     """Fetch a problem; prompt for the contest password and retry once if needed."""
-    try:
-        if contest_id is None:
-            return await client.get_problem(display_id)
-        return await client.get_contest_problem(contest_id, display_id)
-    except OJAPIError as e:
-        if contest_id is not None and CONTEST_PWD_ERROR in e.message:
-            password = typer.prompt("Contest password", hide_input=True)
-            await client.verify_contest_password(contest_id, password)
-            return await client.get_contest_problem(contest_id, display_id)
-        raise
+    if contest_id is None:
+        return await client.get_problem(display_id)
+    return await with_contest_password(
+        lambda: client.get_contest_problem(contest_id, display_id), client, contest_id
+    )
 
 
 async def poll_submission(
@@ -116,24 +131,20 @@ async def poll_submission(
     while True:
         detail = await client.get_submission(submission_id)
         for idx, result in new_testcases(detail, printed):
-            typer.echo(testcase_text(idx, result))
+            console.print(testcase_text(idx, result))
             printed = idx
         if is_final(detail.result):
             print_submission(detail, include_cases=printed == 0)
             return
         if asyncio.get_event_loop().time() >= deadline:
-            typer.secho(
-                f"Judging not finished, current status: {verdict_text(detail.result)}; "
-                f"run 'qduoj-cli status {submission_id} --wait' later",
-                fg=typer.colors.YELLOW,
-                err=True,
+            print_warning(
+                f"judging not finished, current status: {verdict_text(detail.result).plain}; "
+                f"run 'qduoj-cli status {submission_id} --wait' later"
             )
             raise typer.Exit(1)
         await asyncio.sleep(2)
 
-
 # ---- commands ----
-
 
 @app.command()
 def config(
@@ -147,14 +158,14 @@ def config(
         await client.get_profile()
 
     run(body)
-    typer.secho("Server is reachable", fg=typer.colors.GREEN)
+    print_ok("Server is reachable")
 
 
 @app.command()
 def login() -> None:
     """Log in and save the session."""
-    username = typer.prompt("Username")
-    password = typer.prompt("Password", hide_input=True)
+    username = Prompt.ask("Username")
+    password = Prompt.ask("Password", password=True)
 
     async def body(client: OJClient) -> None:
         try:
@@ -162,13 +173,15 @@ def login() -> None:
         except OJAPIError as e:
             if e.message != "tfa_required":
                 raise
-            tfa_code = typer.prompt("2FA code")
+            tfa_code = Prompt.ask("2FA code")
             await client.login(username, password, tfa_code=tfa_code)
         profile = await client.get_profile()
         if profile:
-            typer.secho(f"Logged in as: {profile.user.username}", fg=typer.colors.GREEN)
+            console.print(
+                Text.assemble(("Logged in as ", ""), (profile.user.username, "bold green"))
+            )
         else:
-            typer.secho("Login succeeded but failed to fetch profile", fg=typer.colors.YELLOW)
+            print_warning("login succeeded but failed to fetch profile")
 
     run(body)
 
@@ -183,7 +196,7 @@ def logout() -> None:
         except OJAPIError:
             clear_session()
             raise
-        typer.secho("Logged out", fg=typer.colors.GREEN)
+        print_ok("Logged out")
 
     run(body)
 
@@ -195,14 +208,9 @@ def whoami() -> None:
     async def body(client: OJClient) -> None:
         profile = await client.get_profile()
         if profile is None:
-            typer.echo("Not logged in")
-            return
-        user = profile.user
-        typer.echo(f"Username: {user.username}")
-        if user.email:
-            typer.echo(f"Email: {user.email}")
-        if user.admin_type:
-            typer.echo(f"Role: {user.admin_type}")
+            console.print(Text("Not logged in", style="dim"))
+        else:
+            print_user(profile.user)
 
     run(body)
 
@@ -216,13 +224,9 @@ def contests(
     async def body(client: OJClient) -> None:
         items = await client.list_contests(page)
         if not items:
-            typer.echo("No contests")
+            console.print(Text("No contests", style="dim"))
             return
-        for c in items:
-            status = CONTEST_STATUS.get(c.status or "", "-")
-            typer.echo(
-                f"{c.id:>6}  {status}  {c.start_time or '-'} ~ {c.end_time or '-'}  {c.title}"
-            )
+        print_contests(items)
 
     run(body)
 
@@ -239,18 +243,9 @@ def contest(
     async def body(client: OJClient) -> None:
         if password:
             await client.verify_contest_password(contest_id, password)
-            typer.secho("Contest password accepted", fg=typer.colors.GREEN)
+            print_ok("Contest password accepted")
         data = await client.get_contest(contest_id)
-        c = Contest.model_validate(data)
-        typer.secho(f"{c.id}: {c.title}", fg=typer.colors.GREEN, bold=True)
-        typer.echo(
-            f"Status: {CONTEST_STATUS.get(c.status or '', '-')}  "
-            f"Rule: {c.rule_type or '-'}  Type: {c.contest_type or '-'}"
-        )
-        typer.echo(f"Time: {c.start_time or '-'} ~ {c.end_time or '-'}")
-        if data.get("description"):
-            typer.echo()
-            typer.echo(html_to_text(data["description"]))
+        print_contest(Contest.model_validate(data), data.get("description"))
 
     run(body)
 
@@ -266,11 +261,34 @@ def problem(
     async def body(client: OJClient) -> None:
         p = await get_problem_with_password(client, problem_id, contest)
         if json_out:
-            typer.echo(
-                json.dumps(p.model_dump(mode="json", exclude_none=True), ensure_ascii=False, indent=2)
+            console.print_json(
+                json.dumps(p.model_dump(mode="json", exclude_none=True), ensure_ascii=False)
             )
         else:
             print_problem(p)
+
+    run(body)
+
+@app.command()
+def problems(
+    contest: int | None = typer.Option(None, "--contest", help="List this contest's problems"),
+    page: int = typer.Option(1, "--page", help="Page number, 20 per page (public list)"),
+    keyword: str | None = typer.Option(None, "--keyword", help="Search by title or ID (public list)"),
+) -> None:
+    """List problems: a contest's problem set (--contest) or public problems."""
+
+    async def body(client: OJClient) -> None:
+        if contest is not None:
+            items = await with_contest_password(
+                lambda: client.list_contest_problems(contest), client, contest
+            )
+        else:
+            data = await client.list_problems(page, keyword)
+            items = [Problem.model_validate(item) for item in data.get("results", [])]
+        if not items:
+            console.print(Text("No problems", style="dim"))
+            return
+        print_problems(items)
 
     run(body)
 
@@ -307,13 +325,13 @@ def submit(
             raise OJAPIError(f"file is empty: {file}")
 
         lines = code.count("\n") + (0 if code.endswith("\n") else 1)
-        typer.echo(f"Submitting {p.display_id} ({lang}, {lines} lines)")
+        console.print(Text(f"Submitting {p.display_id} ({lang}, {lines} lines)", style="dim"))
 
         submission_id = await client.submit(p.id, lang, code, contest)
         if submission_id is None:
-            typer.secho("Submitted (this contest does not return a submission id)", fg=typer.colors.YELLOW)
+            print_warning("submitted (this contest does not return a submission id)")
             return
-        typer.secho(f"Submission ID: {submission_id}", fg=typer.colors.GREEN, bold=True)
+        console.print(Text.assemble(("Submission ID: ", ""), (submission_id, "bold green")))
         if not no_wait:
             await poll_submission(client, submission_id)
 
@@ -346,16 +364,13 @@ def submissions(
 
     async def body(client: OJClient) -> None:
         await require_login(client)
-        items = await client.list_my_submissions(contest, limit)
+        items = [
+            SubmissionListItem.model_validate(item)
+            for item in await client.list_my_submissions(contest, limit)
+        ]
         if not items:
-            typer.echo("No submissions")
+            console.print(Text("No submissions", style="dim"))
             return
-        for item in items:
-            m = SubmissionListItem.model_validate(item)
-            time_cost = m.statistic_info.get("time_cost", "-")
-            typer.echo(
-                f"{m.id}  {m.problem or '-'}  {verdict_text(m.result)}  "
-                f"{m.language or '-'}  {time_cost} ms  {m.create_time or '-'}"
-            )
+        print_submissions(items)
 
     run(body)

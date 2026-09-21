@@ -156,6 +156,13 @@ class OJClient:
         )
         return Problem.model_validate(data)
 
+    async def list_contest_problems(self, contest_id: int) -> list[Problem]:
+        """List all problems of a contest (requires contest access)."""
+        data = await self._request(
+            "GET", "/contest/problem", params={"contest_id": contest_id}
+        )
+        return [Problem.model_validate(item) for item in data]
+
     # ---- contests ----
 
     async def list_contests(self, page: int = 1) -> list[Contest]:

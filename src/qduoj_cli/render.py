@@ -1,13 +1,42 @@
-"""Terminal rendering: HTML to plain text, problem and submission display."""
+"""Terminal rendering with rich: HTML to plain text, problem and submission display."""
 
 from __future__ import annotations
 
 import re
 from html.parser import HTMLParser
 
-import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
-from .models import RESULT_NAMES, Problem, SubmissionDetail, is_final
+from .models import (
+    RESULT_NAMES,
+    Contest,
+    Problem,
+    SubmissionDetail,
+    SubmissionListItem,
+    User,
+    is_final,
+)
+
+console = Console()
+err_console = Console(stderr=True)
+
+CONTEST_STATUS = {"1": "Not started", "0": "Running", "-1": "Ended"}
+_STATUS_STYLES = {"Running": "green", "Not started": "yellow", "Ended": "dim"}
+
+_VERDICT_STYLES = {
+    "AC": "bold green",
+    "WA": "bold red",
+    "TLE": "yellow",
+    "MLE": "yellow",
+    "CE": "cyan",
+    "RE": "magenta",
+    "PA": "yellow",
+    "Pending": "dim",
+    "Judging": "dim",
+}
 
 _BLOCK_TAGS = {
     "p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
@@ -47,18 +76,42 @@ def html_to_text(html: str) -> str:
     return parser.result()
 
 
-def _section(title: str) -> None:
-    typer.secho(f"\n-- {title} --", fg=typer.colors.CYAN, bold=True)
+def print_error(message: str) -> None:
+    err_console.print(Text.assemble(("Error: ", "bold red"), (message, "red")))
+
+
+def print_warning(message: str) -> None:
+    err_console.print(Text.assemble(("Warning: ", "bold yellow"), (message, "yellow")))
+
+
+def print_ok(message: str) -> None:
+    console.print(Text(message, style="bold green"))
+
+
+def verdict_text(result: int) -> Text:
+    abbr, desc = RESULT_NAMES.get(result, ("?", f"Unknown status {result}"))
+    style = _VERDICT_STYLES.get(abbr)
+    return Text.assemble((abbr, style), (f" ({desc})", "dim"))
+
+
+def testcase_text(index: int, result: int) -> Text:
+    return Text.assemble((f"Case {index}: ", ""), verdict_text(result))
 
 
 def print_problem(problem: Problem) -> None:
-    tags = f"  [{', '.join(problem.tags)}]" if problem.tags else ""
-    typer.secho(f"{problem.display_id}: {problem.title}", fg=typer.colors.GREEN, bold=True)
-    typer.echo(
-        f"Time limit: {problem.time_limit} ms  Memory limit: {problem.memory_limit} MB"
-        f"  Rule: {problem.rule_type or '-'}{tags}"
+    header = Text()
+    header.append(f"{problem.display_id}: {problem.title}", style="bold green")
+    if problem.tags:
+        header.append(f"  [{', '.join(problem.tags)}]", style="cyan")
+    console.print(header)
+    console.print(
+        Text.assemble(
+            ("Time limit ", "dim"), (f"{problem.time_limit} ms", "bold"),
+            ("   Memory limit ", "dim"), (f"{problem.memory_limit} MB", "bold"),
+            ("   Rule ", "dim"), (problem.rule_type or "-", "bold"),
+        )
     )
-    typer.echo(f"Languages: {', '.join(problem.languages)}")
+    console.print(Text.assemble(("Languages: ", "dim"), (", ".join(problem.languages), "")))
 
     for title, content in (
         ("Description", problem.description),
@@ -68,59 +121,41 @@ def print_problem(problem: Problem) -> None:
     ):
         if not content:
             continue
-        _section(title)
-        typer.echo(html_to_text(content))
+        console.print()
+        console.rule(Text(title, style="bold cyan"), style="dim")
+        console.print(html_to_text(content))
 
     for idx, sample in enumerate(problem.samples, 1):
-        _section(f"Sample {idx} Input")
-        typer.echo(sample.input.rstrip("\n"))
-        _section(f"Sample {idx} Output")
-        typer.echo(sample.output.rstrip("\n"))
-
-
-_VERDICT_COLORS = {
-    "AC": typer.colors.GREEN,
-    "WA": typer.colors.RED,
-    "TLE": typer.colors.YELLOW,
-    "MLE": typer.colors.YELLOW,
-    "CE": typer.colors.CYAN,
-    "RE": typer.colors.MAGENTA,
-    "PA": typer.colors.YELLOW,
-}
-
-
-def verdict_text(result: int) -> str:
-    abbr, desc = RESULT_NAMES.get(result, ("?", f"Unknown status {result}"))
-    color = _VERDICT_COLORS.get(abbr)
-    return typer.style(f"{abbr} ({desc})", fg=color) if color else f"{abbr} ({desc})"
-
-
-def testcase_text(index: int, result: int) -> str:
-    return f"Case {index}: {verdict_text(result)}"
+        console.print()
+        console.print(
+            Panel(sample.input.rstrip("\n") or " ", title=Text(f"Sample {idx} Input"), border_style="dim")
+        )
+        console.print(
+            Panel(sample.output.rstrip("\n") or " ", title=Text(f"Sample {idx} Output"), border_style="dim")
+        )
 
 
 def print_submission(detail: SubmissionDetail, *, include_cases: bool = True) -> None:
-    typer.secho(f"Result: {verdict_text(detail.result)}", bold=True)
+    console.print(Text.assemble(("Result: ", "bold"), verdict_text(detail.result)))
     stat = detail.statistic_info or {}
-    parts = []
+    parts: list[Text] = []
     if stat.get("time_cost") is not None:
-        parts.append(f"time {stat['time_cost']} ms")
+        parts.append(Text.assemble(("time ", "dim"), (f"{stat['time_cost']} ms", "bold")))
     if stat.get("memory_cost") is not None:
-        parts.append(f"memory {stat['memory_cost']} KB")
+        parts.append(Text.assemble(("memory ", "dim"), (f"{stat['memory_cost']} KB", "bold")))
     if stat.get("score") is not None:
-        parts.append(f"score {stat['score']}")
+        parts.append(Text.assemble(("score ", "dim"), (str(stat["score"]), "bold")))
     if parts:
-        typer.echo("  ".join(parts))
+        console.print(Text("   ").join(parts))
     if detail.result == -2 and stat.get("err_info"):
-        typer.secho("Compiler output:", fg=typer.colors.CYAN)
-        typer.echo(stat["err_info"])
+        console.print(Panel(stat["err_info"], title=Text("Compiler output"), border_style="cyan"))
     if not include_cases:
         return
     info = detail.info or {}
     cases = info.get("data")
     if isinstance(cases, list):
         for idx, case in enumerate(cases, 1):
-            typer.echo(testcase_text(idx, case.get("result")))
+            console.print(testcase_text(idx, case.get("result")))
 
 
 def new_testcases(detail: SubmissionDetail, printed: int) -> list[tuple[int, int]]:
@@ -140,3 +175,96 @@ def new_testcases(detail: SubmissionDetail, printed: int) -> list[tuple[int, int
         else:
             break
     return out
+
+
+def _kv_table(rows: list[tuple[str, str | Text]]) -> Table:
+    table = Table(show_header=False, box=None, pad_edge=False)
+    table.add_column(style="dim")
+    table.add_column()
+    for key, value in rows:
+        table.add_row(key, value)
+    return table
+
+
+def print_user(user: User) -> None:
+    rows: list[tuple[str, str | Text]] = [("Username", user.username)]
+    if user.email:
+        rows.append(("Email", user.email))
+    if user.admin_type:
+        rows.append(("Role", user.admin_type))
+    console.print(_kv_table(rows))
+
+
+def status_text(status: str | None) -> Text:
+    label = CONTEST_STATUS.get(status or "", "-")
+    return Text(label, style=_STATUS_STYLES.get(label))
+
+
+def print_contests(contests: list[Contest]) -> None:
+    table = Table(box=None, pad_edge=False)
+    table.add_column("ID", justify="right", style="bold")
+    table.add_column("Status")
+    table.add_column("Start", style="dim")
+    table.add_column("End", style="dim")
+    table.add_column("Title")
+    for c in contests:
+        table.add_row(str(c.id), status_text(c.status), c.start_time or "-", c.end_time or "-", c.title)
+    console.print(table)
+
+
+def print_contest(c: Contest, description: str | None = None) -> None:
+    console.print(Text(f"{c.id}: {c.title}", style="bold green"))
+    console.print(
+        _kv_table(
+            [
+                ("Status", status_text(c.status)),
+                ("Rule", c.rule_type or "-"),
+                ("Type", c.contest_type or "-"),
+                ("Time", f"{c.start_time or '-'} ~ {c.end_time or '-'}"),
+            ]
+        )
+    )
+    if description:
+        console.print(Panel(html_to_text(description), border_style="dim"))
+
+def print_submissions(items: list[SubmissionListItem]) -> None:
+    table = Table(box=None, pad_edge=False)
+    table.add_column("ID", style="dim")
+    table.add_column("Problem", style="bold")
+    table.add_column("Result")
+    table.add_column("Language")
+    table.add_column("Time", justify="right")
+    table.add_column("Created", style="dim")
+    for m in items:
+        stat = m.statistic_info or {}
+        time_cost = f"{stat['time_cost']} ms" if stat.get("time_cost") is not None else "-"
+        table.add_row(
+            m.id, m.problem or "-", verdict_text(m.result), m.language or "-",
+            time_cost, m.create_time or "-",
+        )
+    console.print(table)
+
+
+_DIFFICULTY_STYLES = {"Low": "green", "Mid": "yellow", "High": "red"}
+
+
+def difficulty_text(difficulty: str | None) -> Text:
+    if not difficulty:
+        return Text("-", style="dim")
+    return Text(difficulty, style=_DIFFICULTY_STYLES.get(difficulty))
+
+
+def print_problems(problems: list[Problem]) -> None:
+    table = Table(box=None, pad_edge=False)
+    table.add_column("ID", style="bold")
+    table.add_column("Title")
+    table.add_column("Difficulty")
+    table.add_column("Tags", style="dim")
+    table.add_column("Done", justify="center")
+    for p in problems:
+        solved = Text("AC", style="bold green") if p.my_status == 0 else Text("-", style="dim")
+        table.add_row(
+            p.display_id, p.title, difficulty_text(p.difficulty),
+            ", ".join(p.tags) or "-", solved,
+        )
+    console.print(table)

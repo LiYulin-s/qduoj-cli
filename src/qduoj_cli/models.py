@@ -57,6 +57,7 @@ class Problem(BaseModel):
     rule_type: str | None = None
     tags: list[str] = []
     difficulty: str | None = None
+    my_status: int | None = None  # 0 when solved (list endpoints)
     source: str | None = None
 
 

@@ -432,6 +432,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "pydantic" },
+    { name = "rich" },
     { name = "typer" },
 ]
 
@@ -439,6 +440,7 @@ dependencies = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.14.3" },
     { name = "pydantic", extras = ["all"], specifier = ">=2.13.5" },
+    { name = "rich", specifier = ">=15.0.0" },
     { name = "typer", specifier = ">=0.27.2" },
 ]
 

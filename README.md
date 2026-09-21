@@ -15,7 +15,9 @@ qduoj-cli config https://your-oj.example.com   # 首次使用：保存服务器�
 qduoj-cli login                                 # 交互式登录（支持两步验证）
 qduoj-cli whoami                                # 查看当前用户
 
+qduoj-cli problems                             # 公共题单（--page/--keyword）
 qduoj-cli problem 1000                          # 查看题目（描述/样例/限制）
+qduoj-cli problems --contest 5                 # 比赛题单（密码保护时会提示输入）
 qduoj-cli submit 1000 main.cpp                  # 提交并等待评测结果
 qduoj-cli status <提交号> --wait                 # 查看提交结果
 qduoj-cli submissions                           # 我的提交记录
